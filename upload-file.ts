@@ -8,30 +8,33 @@ import {
 } from "@aws-sdk/client-s3";
 import * as fs from "fs";
 import * as path from "path";
+import * as dotenv from "dotenv";
 
-// Configuración de credenciales y región
-const REGION = "us-east-1"; // Cambia a tu región
- 
+dotenv.config(); // Carga variables .env en process.env
 
-const BUCKET_NAME = "challengys3";
-const FILE_NAME = "2023-archivo-grande.mkv";
-const FILE_PATH = path.resolve(__dirname, "D://Temp/2023-archivo-grande.mkv");
+const REGION = process.env.AWS_REGION || "us-east-1";
+const BUCKET_NAME = process.env.BUCKET_NAME || "tu-bucket";
+const BASE_PATH = path.resolve(__dirname, "D://Temp");
+const PART_SIZE = 5 * 1024 * 1024;
 
-const PART_SIZE = 5 * 1024 * 1024; // 5 MB mínimo
+async function multipartUpload(fileName: string) {
+  const filePath = path.join(BASE_PATH, fileName);
+  const keyName = fileName;
 
-// Inicialización del cliente S3 con credenciales y configuración explícita
-const s3Client = new S3Client({
-  region: REGION  // Signature Version 4 es la predeterminada en SDK v3,
-  // pero si quieres forzarla explícitamente, puedes usar middleware o configuración avanzada.
-  // Aquí no es necesario configurarla explícitamente porque es default.
-});
+  if (!fs.existsSync(filePath)) {
+    console.error(`El archivo "${filePath}" no existe.`);
+    process.exit(1);
+  }
 
-async function multipartUpload() {
+  // El SDK detecta automáticamente las credenciales en process.env
+  const s3Client = new S3Client({
+    region: REGION,
+  });
+
   try {
-    // 1. Iniciar carga multiparte
     const createMultipartUploadCommand = new CreateMultipartUploadCommand({
       Bucket: BUCKET_NAME,
-      Key: FILE_NAME,
+      Key: keyName,
     });
 
     const createMultipartUploadResponse = await s3Client.send(createMultipartUploadCommand);
@@ -43,8 +46,7 @@ async function multipartUpload() {
 
     console.log(`Carga multiparte iniciada. UploadId: ${uploadId}`);
 
-    // 2. Subir partes
-    const fileSize = fs.statSync(FILE_PATH).size;
+    const fileSize = fs.statSync(filePath).size;
     let partNumber = 1;
     let start = 0;
     const uploadedParts: CompletedPart[] = [];
@@ -53,16 +55,16 @@ async function multipartUpload() {
       const end = Math.min(start + PART_SIZE, fileSize);
       const partLength = end - start;
 
-      const partStream = fs.createReadStream(FILE_PATH, {
+      const partStream = fs.createReadStream(filePath, {
         start,
-        end: end - 1, // El rango es inclusivo
+        end: end - 1,
       });
 
       console.log(`Subiendo parte ${partNumber}, bytes ${start} a ${end - 1}`);
 
       const uploadPartCommand = new UploadPartCommand({
         Bucket: BUCKET_NAME,
-        Key: KEY_NAME,
+        Key: keyName,
         UploadId: uploadId,
         PartNumber: partNumber,
         Body: partStream,
@@ -86,10 +88,9 @@ async function multipartUpload() {
       start += PART_SIZE;
     }
 
-    // 3. Completar la carga multiparte
     const completeMultipartUploadCommand = new CompleteMultipartUploadCommand({
       Bucket: BUCKET_NAME,
-      Key: KEY_NAME,
+      Key: keyName,
       UploadId: uploadId,
       MultipartUpload: {
         Parts: uploadedParts,
@@ -103,12 +104,11 @@ async function multipartUpload() {
   } catch (error) {
     console.error("Error durante la carga multiparte:", error);
 
-    // Si hay uploadId, abortar la carga para liberar recursos
     if (error instanceof Error && (error as any).uploadId) {
       const uploadId = (error as any).uploadId;
       const abortMultipartUploadCommand = new AbortMultipartUploadCommand({
         Bucket: BUCKET_NAME,
-        Key: KEY_NAME,
+        Key: fileName,
         UploadId: uploadId,
       });
       await s3Client.send(abortMultipartUploadCommand);
@@ -117,7 +117,14 @@ async function multipartUpload() {
   }
 }
 
-// Ejecutar la función
-multipartUpload().catch((error) => {
+const args = process.argv.slice(2);
+if (args.length !== 1) {
+  console.error("Uso: node upload.js <nombre-archivo>");
+  process.exit(1);
+}
+
+const fileName = args[0];
+
+multipartUpload(fileName).catch((error) => {
   console.error("Error inesperado:", error);
 });
